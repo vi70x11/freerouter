@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
@@ -291,7 +291,12 @@ describe('proxy stream turn-integrity', () => {
 describe('sticky session integrity', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    process.env.STICKY_SESSION_ENABLED = 'true';
     initDb(':memory:');
+  });
+
+  afterAll(() => {
+    delete process.env.STICKY_SESSION_ENABLED;
   });
 
   it('keeps affinity from turn 1 to turn 2 (the old single/multi key gap)', () => {

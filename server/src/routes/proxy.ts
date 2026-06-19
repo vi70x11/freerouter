@@ -60,7 +60,9 @@ export function extractApiToken(req: Request): string | undefined {
 // Sticky sessions: track which model served each "session"
 // Key: <api_key>:<session_hash> → model_db_id
 // This prevents model switching mid-conversation which causes hallucination
-const stickySessionEnabled = process.env.STICKY_SESSION_ENABLED === 'true';
+function isStickySessionEnabled(): boolean {
+  return process.env.STICKY_SESSION_ENABLED === 'true';
+}
 const stickySessionMap = new Map<string, { modelDbId: number; lastUsed: number }>();
 const STICKY_TTL_MS = 30 * 60 * 1000; // 30 min session TTL
 
@@ -98,7 +100,7 @@ function getSessionKeyWithApiKey(apiKey: string | undefined, messages: ChatMessa
 export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string): number | undefined {
   // Only apply sticky for multi-turn (has assistant messages = continuation)
   // Skip if sticky sessions are disabled
-  if (!stickySessionEnabled) return undefined;
+  if (!isStickySessionEnabled()) return undefined;
 
   const hasAssistant = messages.some(m => m.role === 'assistant');
   if (!hasAssistant) return undefined;
@@ -118,7 +120,7 @@ export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string
 
 export function setStickyModel(messages: ChatMessage[], modelDbId: number, sessionIdHeader?: string) {
   // Only apply sticky if enabled
-  if (!stickySessionEnabled) return;
+  if (!isStickySessionEnabled()) return;
 
   const key = getSessionKey(messages, sessionIdHeader);
   if (!key) return;
