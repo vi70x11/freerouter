@@ -381,6 +381,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         // tool-call accumulator keyed by the provider's tool_call index
         const toolAcc = new Map<number, { outputIndex: number; itemId: string; callId: string; name: string; args: string }>();
         let totalOutputTokens = 0;
+        let totalReasoningTokens = 0;
 
         // Inline-dialect hold window (#231): first text is held until it
         // either matches a tool-call dialect marker (held to the end and
@@ -449,6 +450,11 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
           // Text deltas → output_text events on a single message item, after
           // the dialect hold window has decided the text is real prose.
           const text = delta.content ?? '';
+          // Count reasoning tokens from thinking/reasoning deltas for fair speed scoring.
+          const reasoningText = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
+          if (reasoningText.length > 0) {
+            totalReasoningTokens += Math.ceil(reasoningText.length / 4);
+          }
           if (text) {
             totalOutputTokens += Math.ceil(text.length / 4);
             if (dialectMode === 'passthrough') {
@@ -590,7 +596,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         recordTokens(route.platform, route.modelId, route.keyId, estimatedInputTokens + totalOutputTokens);
         recordSuccess(route.modelDbId);
         setStickyModel(messages, route.modelDbId, sessionIdHeader);
-        logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null);
+        logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, null, null, totalReasoningTokens);
         return;
       } else {
         const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, completionOpts);
@@ -620,6 +626,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         }
         const promptTokens = result.usage?.prompt_tokens ?? estimatedInputTokens;
         const completionTokens = result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
+        const reasoningTokens = (result.usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0;
 
         // Empty completion → fail over (see the streaming-path comment above).
         if (!text && toolCalls.length === 0) {
@@ -644,7 +651,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         }));
 
         logRequest(route.platform, route.modelId, route.keyId, 'success',
-          promptTokens, completionTokens, Date.now() - start, null);
+          promptTokens, completionTokens, Date.now() - start, null, null, null, reasoningTokens);
         return;
       }
     } catch (err: any) {

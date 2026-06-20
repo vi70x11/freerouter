@@ -368,8 +368,9 @@ export class AnthropicCompatProvider extends BaseProvider {
     const output = usage?.output_tokens ?? 0;
     return {
       prompt_tokens: input,
-      completion_tokens: output,
+      completion_tokens: output,  // Anthropic: this already includes thinking
       total_tokens: input + output,
+      reasoning_tokens: 0,  // not broken out by Anthropic; counted at proxy level
     };
   }
 
