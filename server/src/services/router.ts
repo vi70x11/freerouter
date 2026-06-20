@@ -257,7 +257,7 @@ export function refreshStatsCache(db: Database, force = false): void {
       CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,
       COUNT(*) AS total,
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes,
-      SUM(CASE WHEN status = 'success' THEN output_tokens ELSE 0 END) AS succ_out,
+      SUM(CASE WHEN status = 'success' THEN output_tokens + reasoning_tokens ELSE 0 END) AS succ_out,
       SUM(CASE WHEN status = 'success' THEN latency_ms ELSE 0 END) AS succ_lat,
       SUM(CASE WHEN status = 'success' AND ttfb_ms IS NOT NULL THEN ttfb_ms ELSE 0 END) AS succ_ttfb_sum,
       SUM(CASE WHEN status = 'success' AND ttfb_ms IS NOT NULL THEN 1 ELSE 0 END) AS succ_ttfb_cnt

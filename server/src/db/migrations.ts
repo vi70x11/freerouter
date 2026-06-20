@@ -8,7 +8,7 @@ import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
 // additions, indexes, FKs) that use "IF NOT EXISTS" should stay unconditional.
-const CURRENT_DATA_VERSION = 2;
+const CURRENT_DATA_VERSION = 3;
 
 export function migrateDbSchema(db: Database.Database) {
   // Schema-level changes run every boot — they're idempotent (IF NOT EXISTS).
@@ -19,6 +19,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateSchemaV29ArchiveProviders(db);
   migrateSchemaV30KeylessProviders(db);
   migrateSchemaV31ApiFormat(db);
+  migrateSchemaV34ReasoningTokens(db);
   migrateEmbeddingsV1(db);
   migrateCustomProvidersV24(db);
 
@@ -57,6 +58,13 @@ export function migrateDbSchema(db: Database.Database) {
       // V2 data migration: enforce free-only for OpenRouter and OpenCode.
       // Runs exactly once so user re-enables persist across reboots.
       migrateModelsFreeOnlyEnforcement(db);
+      // V3: reset request analytics so speed scores start from a clean
+      // baseline that includes reasoning tokens. Old rows have reasoning_
+      // tokens=0 which would undercount reasoning-model speed until enough
+      // new data overwhelms the decay-weighted average.
+      db.prepare('DELETE FROM requests').run();
+      db.prepare('DELETE FROM model_stats_temp').run();
+      console.log('✅ Reset request analytics for reasoning-token fairness (V3)');
       db.pragma(`user_version = ${CURRENT_DATA_VERSION}`);
     });
     apply();
@@ -159,6 +167,7 @@ function createTables(db: Database.Database) {
       status TEXT NOT NULL,
       input_tokens INTEGER NOT NULL DEFAULT 0,
       output_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_tokens INTEGER NOT NULL DEFAULT 0,
       latency_ms INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -2526,6 +2535,14 @@ function migrateSchemaV31ApiFormat(db: Database.Database) {
   const cols = db.prepare("PRAGMA table_info('custom_providers')").all() as Array<{ name: string }>;
   if (!cols.some(c => c.name === 'api_format')) {
     db.prepare("ALTER TABLE custom_providers ADD COLUMN api_format TEXT DEFAULT 'openai'").run();
+  }
+}
+
+function migrateSchemaV34ReasoningTokens(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(requests)').all() as { name: string }[];
+  if (!columns.some(col => col.name === 'reasoning_tokens')) {
+    db.prepare('ALTER TABLE requests ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0').run();
+    console.log('✅ Added reasoning_tokens column to requests');
   }
 }
 

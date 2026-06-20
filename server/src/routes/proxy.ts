@@ -840,6 +840,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         //  - a stream that ends with neither content nor calls is an empty
         //    completion and fails over like the non-stream path.
         let totalOutputTokens = 0;
+        let totalReasoningTokens = 0;
         let headerSent = false;
         let ttfbMs: number | null = null;
 
@@ -922,6 +923,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               if (tc.id && !acc.id) acc.id = tc.id;
               if (tc.function?.name) acc.name += tc.function.name;
               if (tc.function?.arguments) acc.args += tc.function.arguments;
+            }
+
+            // Count reasoning tokens from thinking/reasoning deltas for fair speed scoring.
+            const reasoningText = typeof choice.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '';
+            if (reasoningText.length > 0) {
+              totalReasoningTokens += Math.ceil(reasoningText.length / 4);
             }
 
             normalizeOutboundContent(chunk);
@@ -1027,7 +1034,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           recordSuccess(route.modelDbId);
           setStickyModel(messages, route.modelDbId, sessionIdHeader);
           if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey });
-          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens + injectedHandoffTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, pinnedModelId);
+          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens + injectedHandoffTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, pinnedModelId, totalReasoningTokens);
           publish({ type: 'request.done', id: requestId, model: route.modelId, provider: route.platform, keyId: route.keyId, latencyMs: Date.now() - start, tokens: { in: estimatedInputTokens + injectedHandoffTokens, out: totalOutputTokens }, at: Date.now() });
           clearExhausted(route.keyId, route.modelId);
           return;
@@ -1114,11 +1121,14 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Normalize array-shaped message.content to a string on the way out (#166).
         res.json(normalizeOutboundContent(result));
 
+        // OpenAI-compatible providers report reasoning tokens in completion_tokens_details.
+        // Anthropic's completion_tokens already include thinking (see anthropic.ts translateUsage).
+        const reasoningTokens = (result.usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0;
         logRequest(
           route.platform, route.modelId, route.keyId, 'success',
           result.usage?.prompt_tokens ?? 0,
           result.usage?.completion_tokens ?? 0,
-          Date.now() - start, null, null, pinnedModelId,
+          Date.now() - start, null, null, pinnedModelId, reasoningTokens,
         );
         publish({ type: 'request.done', id: requestId, model: route.modelId, provider: route.platform, keyId: route.keyId, latencyMs: Date.now() - start, tokens: { in: result.usage?.prompt_tokens ?? 0, out: result.usage?.completion_tokens ?? 0 }, at: Date.now() });
         clearExhausted(route.keyId, route.modelId);
@@ -1251,13 +1261,14 @@ export function logRequest(
   // analytics split pinned vs auto traffic and detect failover overrides
   // (requested_model set but != model_id).
   requestedModel: string | null = null,
+  reasoningTokens: number = 0,   // thinking/reasoning tokens for fair speed scoring
 ) {
   try {
     const db = getDb();
     db.prepare(`
-      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel);
+      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, reasoning_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, reasoningTokens);
   } catch (e) {
     console.error('Failed to log request:', e);
   }

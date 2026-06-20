@@ -289,6 +289,7 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  reasoning_tokens?: number;  // thinking/reasoning tokens produced by the model
 }
 
 export interface ChatCompletionResponse {
