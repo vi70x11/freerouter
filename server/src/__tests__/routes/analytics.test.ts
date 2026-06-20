@@ -59,6 +59,16 @@ function insertModel(platform: string, modelId: string, enabled = 1) {
   `).run(platform, modelId, modelId, enabled);
 }
 
+function insertFallbackConfig(platform: string, modelId: string, enabled = 1) {
+  const db = getDb();
+  const model = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(platform, modelId) as { id: number } | undefined;
+  if (!model) return;
+  db.prepare(`
+    INSERT OR IGNORE INTO fallback_config (model_db_id, priority, enabled)
+    VALUES (?, 99, ?)
+  `).run(model.id, enabled);
+}
+
 function insertErrorRequest(
   platform: string,
   modelId: string,
@@ -85,6 +95,7 @@ describe('Analytics API', () => {
   beforeEach(() => {
     getDb().prepare('DELETE FROM requests').run();
     getDb().prepare('DELETE FROM api_keys').run();
+    getDb().prepare('DELETE FROM fallback_config').run();
     // Seed keys and models so the active-provider filter includes these platforms' data.
     // Models use INSERT OR IGNORE to avoid UNIQUE conflicts with initDb-seeded rows.
     insertKey('test', 1);
@@ -95,6 +106,11 @@ describe('Analytics API', () => {
     insertModel('test', 'model-b');
     insertModel('groq', 'llama-3.3-70b-versatile');
     insertModel('custom', 'mystery-model');
+    insertFallbackConfig('test', 'test-model', 1);
+    insertFallbackConfig('test', 'model-a', 1);
+    insertFallbackConfig('test', 'model-b', 1);
+    insertFallbackConfig('groq', 'llama-3.3-70b-versatile', 1);
+    insertFallbackConfig('custom', 'mystery-model', 1);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
   });
@@ -293,7 +309,9 @@ describe('Analytics API', () => {
     it('excludes disabled model from by-model breakdown', async () => {
       insertKey('dm', 1);
       insertModel('dm', 'active-m', 1);
-      insertModel('dm', 'disabled-m', 0);
+      insertFallbackConfig('dm', 'active-m', 1);
+      insertModel('dm', 'disabled-m', 1);
+      insertFallbackConfig('dm', 'disabled-m', 0);
       insertTokensRequest('dm', 'active-m', 'success', 100, 100, '2026-05-29 11:00:00');
       insertTokensRequest('dm', 'disabled-m', 'success', 100, 100, '2026-05-29 11:00:00');
 
@@ -307,6 +325,7 @@ describe('Analytics API', () => {
     it('includes untracked model (no models row) in by-model breakdown', async () => {
       insertKey('untracked', 1);
       insertModel('untracked', 'known-m', 1);
+      insertFallbackConfig('untracked', 'known-m', 1);
       insertTokensRequest('untracked', 'known-m', 'success', 100, 100, '2026-05-29 11:00:00');
       insertTokensRequest('untracked', 'ghost-m', 'success', 100, 100, '2026-05-29 11:00:00');
 
@@ -319,13 +338,14 @@ describe('Analytics API', () => {
 
     it('re-enabled model appears in by-model breakdown', async () => {
       insertKey('retoggle', 1);
-      insertModel('retoggle', 'm1', 0);
+      insertModel('retoggle', 'm1', 1);
+      insertFallbackConfig('retoggle', 'm1', 0);
       insertTokensRequest('retoggle', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
 
       const before = await request(app, '/api/analytics/by-model?range=24h');
       expect(before.body.filter((r: any) => r.platform === 'retoggle')).toHaveLength(0);
 
-      getDb().prepare('UPDATE models SET enabled = 1 WHERE platform = ? AND model_id = ?').run('retoggle', 'm1');
+      getDb().prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = (SELECT id FROM models WHERE platform = ? AND model_id = ?)').run('retoggle', 'm1');
 
       const after = await request(app, '/api/analytics/by-model?range=24h');
       const rtRows = after.body.filter((r: any) => r.platform === 'retoggle');
@@ -337,7 +357,9 @@ describe('Analytics API', () => {
     it('disabled model on active platform does not affect by-platform', async () => {
       insertKey('dm2', 1);
       insertModel('dm2', 'active-m2', 1);
-      insertModel('dm2', 'disabled-m2', 0);
+      insertFallbackConfig('dm2', 'active-m2', 1);
+      insertModel('dm2', 'disabled-m2', 1);
+      insertFallbackConfig('dm2', 'disabled-m2', 0);
       insertTokensRequest('dm2', 'active-m2', 'success', 100, 100, '2026-05-29 11:00:00');
       insertTokensRequest('dm2', 'disabled-m2', 'success', 100, 100, '2026-05-29 11:00:00');
 
@@ -347,6 +369,18 @@ describe('Analytics API', () => {
       expect(dm2Row).toBeDefined();
       // by-platform counts ALL requests for the active platform, including disabled-model requests
       expect(dm2Row.requests).toBe(2);
+    });
+
+    it('excludes model disabled in fallback but enabled in models table', async () => {
+      insertKey('fb', 1);
+      insertModel('fb', 'fallback-off-m', 1);
+      insertFallbackConfig('fb', 'fallback-off-m', 0);
+      insertTokensRequest('fb', 'fallback-off-m', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      const fbRows = body.filter((r: any) => r.platform === 'fb');
+      expect(fbRows).toHaveLength(0);
     });
   });
 });

@@ -130,9 +130,11 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
     WHERE r.created_at >= ?
       ${pf.sql}
       AND (m.enabled IS NULL OR m.enabled = 1)
+      AND (fc.enabled IS NULL OR fc.enabled = 1)
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
   `).all(since, ...pf.params) as any[];
