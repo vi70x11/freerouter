@@ -11,7 +11,7 @@ import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
   speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, combineScore,
-  latencyCompositeFromSize, heavyWeightedLatencyScore,
+  latencyCompositeFromSize, heavyWeightedLatencyScore, costScore,
 } from './scoring.js';
 import {
   getDegradationFactor, getPenalty, getAllStatesView, initDegradation, getBoost,
@@ -68,6 +68,9 @@ interface ChainRow {
   nim_throughput_tps: number | null;
   nim_avg_response_ms: number | null;
   nim_uptime_pct: number | null;
+  // Per-million-token pricing for the cost-efficiency axis.
+  input_price_per_million: number | null;
+  output_price_per_million: number | null;
 }
 
 export interface RouteResult {
@@ -189,11 +192,12 @@ export function getCustomWeights(): RoutingWeights {
       const speed = w.speed ?? 0;
       const intelligence = w.intelligence ?? 0;
       const latency = w.latency ?? 0.20;  // default for old 3-axis stored weights
+      const cost = w.cost ?? 0.15;          // default for pre-cost stored weights
       if (
-        [reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0) &&
-        reliability + speed + intelligence + latency > 0
+        [reliability, speed, intelligence, latency, cost].every(v => Number.isFinite(v) && v >= 0) &&
+        reliability + speed + intelligence + latency + cost > 0
       ) {
-        return { reliability, speed, intelligence, latency };
+        return { reliability, speed, intelligence, latency, cost };
       }
     } catch { /* corrupt setting → fall through to default */ }
   }
@@ -201,11 +205,11 @@ export function getCustomWeights(): RoutingWeights {
 }
 
 export function setCustomWeights(weights: RoutingWeights): void {
-  const { reliability, speed, intelligence, latency } = weights;
-  if (![reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0)) {
+  const { reliability, speed, intelligence, latency, cost } = weights;
+  if (![reliability, speed, intelligence, latency, cost].every(v => Number.isFinite(v) && v >= 0)) {
     throw new Error('Custom weights must be non-negative numbers');
   }
-  const sum = reliability + speed + intelligence + latency;
+  const sum = reliability + speed + intelligence + latency + cost;
   if (sum <= 0) {
     throw new Error('Custom weights must not all be zero');
   }
@@ -214,6 +218,7 @@ export function setCustomWeights(weights: RoutingWeights): void {
     speed: speed / sum,
     intelligence: intelligence / sum,
     latency: latency / sum,
+    cost: cost / sum,
   }));
 }
 
@@ -369,7 +374,7 @@ function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benc
 // Per-model axis values + the final score. `sampled` chooses Thompson sampling
 // (for routing) vs. the expected value (for a stable dashboard display).
 interface ScoredEntry {
-  axes: { reliability: number; speed: number; intelligence: number; latency: number };
+  axes: { reliability: number; speed: number; intelligence: number; latency: number; cost: number };
   degradationFactor: number;
   boost: number;
   score: number;
@@ -435,6 +440,9 @@ function scoreChainEntry(
   const degradationFactor = getDegradationFactor(entry.model_db_id);
   const boost = getBoost(entry.model_db_id);
 
+  // Cost axis: cheaper models score higher [0,1]; null pricing → neutral prior.
+  const cost = costScore(entry.input_price_per_million, entry.output_price_per_million);
+
   // Phase 1: log NIM metrics if available, but do NOT blend into routing scores
   if (entry.nim_throughput_tps != null || entry.nim_avg_response_ms != null || entry.nim_uptime_pct != null) {
     console.log(
@@ -446,9 +454,9 @@ function scoreChainEntry(
     );
   }
 
-  const baseScore = combineScore({ reliability, speed, intelligence, latency, degradationFactor }, weights);
+  const baseScore = combineScore({ reliability, speed, intelligence, latency, cost, degradationFactor }, weights);
   const score = baseScore * boost;
-  return { axes: { reliability, speed, intelligence, latency }, degradationFactor, boost, score };
+  return { axes: { reliability, speed, intelligence, latency, cost }, degradationFactor, boost, score };
 }
 
 /**
@@ -526,7 +534,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
            m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
            m.benchmark_score,
-           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
+           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct,
+           m.input_price_per_million, m.output_price_per_million
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
     WHERE fc.enabled = 1
@@ -746,6 +755,7 @@ export interface RoutingScore {
   speed: number;
   intelligence: number;
   latency: number;
+  cost: number;
   degradationFactor: number;
   boost: number;
   score: number;
@@ -763,7 +773,8 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
            m.size_label,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
            m.supports_tools, m.benchmark_score, m.context_window, m.max_output_tokens,
-           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
+           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct,
+           m.input_price_per_million, m.output_price_per_million
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE m.enabled = 1
@@ -799,6 +810,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       speed: scored.axes.speed,
       intelligence: scored.axes.intelligence,
       latency: scored.axes.latency,
+      cost: scored.axes.cost,
       degradationFactor: scored.degradationFactor,
       boost: scored.boost,
       score: scored.score,

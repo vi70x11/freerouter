@@ -26,6 +26,7 @@ export interface RoutingWeights {
   speed: number;
   intelligence: number;
   latency: number;
+  cost: number;
 }
 
 // Strategy is either the legacy manual chain ('priority'), one of the bandit
@@ -34,15 +35,19 @@ export interface RoutingWeights {
 export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom';
 
 export const BANDIT_PRESETS: Record<Exclude<RoutingStrategy, 'priority' | 'custom'>, RoutingWeights> = {
-  // Reliability leads; speed, intelligence, latency split the rest evenly.
-  balanced: { reliability: 0.40, speed: 0.20, intelligence: 0.20, latency: 0.20 },
+  // Reliability leads; speed, intelligence, latency split the rest evenly;
+  // cost gets a moderate share so cheaper models are preferred when similar.
+  balanced: { reliability: 0.30, speed: 0.20, intelligence: 0.20, latency: 0.15, cost: 0.15 },
   // Intelligence leads; latency gets a small edge over raw speed because smart
   // models tend to have higher TTFB and shouldn't be entirely penalized.
-  smartest: { reliability: 0.30, speed: 0.10, intelligence: 0.45, latency: 0.15 },
+  // Cost is low — capability matters more than price.
+  smartest: { reliability: 0.25, speed: 0.10, intelligence: 0.40, latency: 0.15, cost: 0.10 },
   // Both throughput (speed) and responsiveness (latency) are heavily weighted.
-  fastest: { reliability: 0.25, speed: 0.30, intelligence: 0.10, latency: 0.35 },
+  // Cost gets a moderate share — cheap+fast is ideal for quick tasks.
+  fastest: { reliability: 0.20, speed: 0.25, intelligence: 0.10, latency: 0.30, cost: 0.15 },
   // Reliability dominates; the remaining 40% splits evenly among the other three.
-  reliable: { reliability: 0.60, speed: 0.10, intelligence: 0.15, latency: 0.15 },
+  // Cost gets a small share — depend above all else.
+  reliable: { reliability: 0.50, speed: 0.10, intelligence: 0.15, latency: 0.10, cost: 0.15 },
 };
 
 // Analytics-driven routing is on by default ('balanced'). Operators who want the
@@ -268,6 +273,7 @@ export interface ScoreInputs {
   speed: number;         // [0,1]
   intelligence: number;  // [0,1]
   latency: number;       // [0,1]
+  cost: number;          // [0,1] — 1 = cheapest, 0 = most expensive
   degradationFactor: number; // [0,1] multiplier from degradation engine
 }
 
@@ -277,11 +283,43 @@ export interface ScoreInputs {
  * the base never escapes [0,1].
  */
 export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): number {
-  const wSum = weights.reliability + weights.speed + weights.intelligence + weights.latency || 1;
+  const wSum = weights.reliability + weights.speed + weights.intelligence + weights.latency + weights.cost || 1;
   const base =
     (weights.reliability * inputs.reliability +
       weights.speed * inputs.speed +
       weights.intelligence * inputs.intelligence +
-      weights.latency * inputs.latency) / wSum;
+      weights.latency * inputs.latency +
+      weights.cost * inputs.cost) / wSum;
   return base * inputs.degradationFactor;
+}
+
+// ── Cost efficiency ───────────────────────────────────────────────────────────
+// Cheaper models score higher. Uses log-scale normalization so the vast price
+// range ($0.08/M to $150/M) is compressed into a useful [0,1] axis.
+//
+//   avgCost = (inputPrice + outputPrice) / 2
+//   raw     = 1 - (log(avgCost) - log(MIN)) / (log(MAX) - log(MIN))
+//   score   = clamp(raw, 0, 1)
+//
+// Models with no pricing data return COST_PRIOR (neutral 0.5) so they are
+// neither rewarded nor punished on the cost axis.
+export const COST_MIN = 0.08;    // cheapest known model ($/M tokens)
+export const COST_MAX = 150.0;   // most expensive known ($/M tokens)
+export const COST_PRIOR = 0.5;   // neutral score when no pricing data
+
+/**
+ * Cost-efficiency score [0,1]. Cheaper models score higher.
+ * Pass null for both prices to get the neutral prior.
+ */
+export function costScore(inputPrice: number | null, outputPrice: number | null): number {
+  if (inputPrice == null && outputPrice == null) return COST_PRIOR;
+  // Use whichever prices are available; default missing side to the other.
+  const inp = inputPrice ?? outputPrice ?? 0;
+  const out = outputPrice ?? inputPrice ?? 0;
+  const avg = (inp + out) / 2;
+  if (avg <= 0) return COST_PRIOR;
+  const logMin = Math.log(COST_MIN);
+  const logMax = Math.log(COST_MAX);
+  const raw = 1 - (Math.log(avg) - logMin) / (logMax - logMin);
+  return Math.max(0, Math.min(1, raw));
 }

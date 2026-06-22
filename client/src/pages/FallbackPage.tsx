@@ -61,7 +61,7 @@ interface FallbackEntry {
 
 type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
 
-type RoutingWeights = { reliability: number; speed: number; intelligence: number; latency: number }
+type RoutingWeights = { reliability: number; speed: number; intelligence: number; latency: number; cost: number }
 
 interface RoutingScore {
   modelDbId: number
@@ -69,6 +69,7 @@ interface RoutingScore {
   speed: number
   intelligence: number
   latency: number
+  cost: number
   boost: number
   score: number
   totalRequests: number
@@ -86,11 +87,11 @@ type Row = FallbackEntry & Partial<RoutingScore>
 
 const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
   { key: 'priority', label: 'Manual', blurb: 'Route in the exact order you set below. Drag the handles to reorder. No scoring; the chain is followed top-to-bottom.' },
-  { key: 'balanced', label: 'Balanced', blurb: 'Reliability leads (40%), with speed, intelligence and latency weighted equally (20% each). A sensible all-round default.' },
-  { key: 'smartest', label: 'Smartest', blurb: 'Prefer the most capable model that still works. Intelligence 45%, reliability 30%, latency 15%, speed 10%.' },
-  { key: 'fastest', label: 'Fastest', blurb: 'Prefer the fastest, most responsive model. Latency 35%, speed 30%, reliability 25%, intelligence 10%.' },
-  { key: 'reliable', label: 'Most reliable', blurb: 'Maximize success rate above all. Reliability 60%, intelligence 15%, latency 15%, speed 10%.' },
-  { key: 'custom', label: 'Custom', blurb: 'Set your own balance of reliability, speed, intelligence and latency with sliders. Same engine as the presets, just your weights.' },
+  { key: 'balanced', label: 'Balanced', blurb: 'Reliability leads (30%), intelligence & speed 20% each, latency & cost 15% each. A sensible all-round default.' },
+  { key: 'smartest', label: 'Smartest', blurb: 'Prefer the most capable model that still works. Intelligence 40%, reliability 25%, latency & cost 15% each, speed 10%.' },
+  { key: 'fastest', label: 'Fastest', blurb: 'Prefer the fastest, most responsive model. Latency 30%, speed 25%, reliability 20%, cost & intelligence 15%/10%.' },
+  { key: 'reliable', label: 'Most reliable', blurb: 'Maximize success rate above all. Reliability 50%, intelligence 15%, cost & latency 15%/10%, speed 10%.' },
+  { key: 'custom', label: 'Custom', blurb: 'Set your own balance of reliability, speed, intelligence, latency and cost with sliders. Same engine as the presets, just your weights.' },
 ]
 
 // Slider axes share the colors used by the score table columns below.
@@ -99,6 +100,7 @@ const WEIGHT_AXES: { key: keyof RoutingWeights; label: string; color: string }[]
   { key: 'speed', label: 'Speed', color: '#3b82f6' },
   { key: 'intelligence', label: 'Intelligence', color: '#a855f7' },
   { key: 'latency', label: 'Latency', color: '#f59e0b' },
+  { key: 'cost', label: 'Cost', color: '#10b981' },
 ]
 
 // Slider popover for the 'custom' strategy. Sliders are independent (0-100)
@@ -118,6 +120,7 @@ function CustomWeightsPopover({ saved, onSave, saving }: {
       speed: Math.round(w.speed * 100),
       intelligence: Math.round(w.intelligence * 100),
       latency: Math.round(w.latency * 100),
+      cost: Math.round((w.cost ?? 0.15) * 100),
     }
   }
 
@@ -133,11 +136,12 @@ function CustomWeightsPopover({ saved, onSave, saving }: {
       speed: values.speed / 100,
       intelligence: values.intelligence / 100,
       latency: values.latency / 100,
+      cost: values.cost / 100,
     })
     setDirty(false)
   }
 
-  const sum = values.reliability + values.speed + values.intelligence + values.latency
+  const sum = values.reliability + values.speed + values.intelligence + values.latency + values.cost
 
   return (
     <Popover onOpenChange={open => { if (open) { setValues(fromSaved(saved)); setDirty(false) } }}>
@@ -795,7 +799,8 @@ export default function FallbackPage() {
                 reliability {Math.round(routing.weights.reliability * 100)}% ·
                 {' '}speed {Math.round(routing.weights.speed * 100)}% ·
                 {' '}intelligence {Math.round(routing.weights.intelligence * 100)}% ·
-                {' '}latency {Math.round(routing.weights.latency * 100)}%
+                {' '}latency {Math.round(routing.weights.latency * 100)}% ·
+                {' '}cost {Math.round((routing.weights.cost ?? 0) * 100)}%
               </span>
             )}
           </div>

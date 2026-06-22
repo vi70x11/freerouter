@@ -133,6 +133,10 @@ export interface Model {
   enabled: boolean;
   supportsVision: boolean;
   supportsTools: boolean;
+  // Per-million-token pricing for cost-efficiency scoring. NULL when no pricing
+  // data is available (the cost axis returns a neutral prior for such models).
+  inputPricePerMillion?: number | null;
+  outputPricePerMillion?: number | null;
 }
 
 export interface ModelListRow {

@@ -86,6 +86,10 @@ export function migrateDbSchema(db: Database.Database) {
       if (errors.length > 0) console.warn('[Boot] Benchmark errors:', errors.join('; '));
     })
     .catch(err => console.warn('[Boot] SWE-rebench fetch failed:', err));
+
+  // Bluesminds model inventory refresh — ensures the correct model IDs and
+  // pricing data are seeded. Runs every boot as a non-destructive upsert.
+  migrateBluesmindsInventory(db);
 }
 
 function createTables(db: Database.Database) {
@@ -244,6 +248,7 @@ function createTables(db: Database.Database) {
   ensureBenchmarkSourceWeightsTable(db);
   ensureDegradationTable(db);
   ensureDegradationBoostColumn(db);
+  ensureModelsPricingColumns(db);
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -364,6 +369,18 @@ function ensureModelsBenchmarkColumns(db: Database.Database) {
   }
   if (!columns.some(col => col.name === 'last_benchmark_update')) {
     db.prepare('ALTER TABLE models ADD COLUMN last_benchmark_update TEXT').run();
+  }
+}
+
+// Per-million-token pricing columns for the cost-efficiency scoring axis.
+// NULL = no pricing data → cost axis returns COST_PRIOR (neutral).
+function ensureModelsPricingColumns(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+  if (!columns.some(col => col.name === 'input_price_per_million')) {
+    db.prepare('ALTER TABLE models ADD COLUMN input_price_per_million REAL').run();
+  }
+  if (!columns.some(col => col.name === 'output_price_per_million')) {
+    db.prepare('ALTER TABLE models ADD COLUMN output_price_per_million REAL').run();
   }
 }
 
@@ -2611,5 +2628,121 @@ function migrateNIMWeightZero(db: Database.Database) {
     }
   } catch {
     // Table may not exist yet in older DBs — safe to skip
+  }
+}
+
+// ── Bluesminds model inventory (non-destructive, runs every boot) ────────────
+// Replaces the stale V27 Bluesminds seeds (which had incorrect model IDs like
+// 'accounts/fireworks/models/deepseek-v4-pro') with the actual model catalog
+// from the Bluesminds API. Also seeds per-model pricing for the cost axis.
+function migrateBluesmindsInventory(db: Database.Database) {
+  type ModelDef = {
+    id: string; name: string;
+    context: number; maxOut: number;
+    intel: number; speed: number; size: string;
+    inputPrice: number; outputPrice: number;
+  };
+
+  const models: ModelDef[] = [
+    // OpenAI family
+    { id: 'gpt-3.5-turbo-0613', name: 'GPT-3.5 Turbo', context: 4096, maxOut: 4096, intel: 50, speed: 80, size: 'Medium', inputPrice: 0.3, outputPrice: 0.6 },
+    { id: 'gpt-4o', name: 'GPT-4o', context: 128000, maxOut: 16384, intel: 85, speed: 40, size: 'Large', inputPrice: 5.0, outputPrice: 50.0 },
+    { id: 'gpt-4o-mini', name: 'GPT-4o Mini', context: 128000, maxOut: 16384, intel: 70, speed: 80, size: 'Medium', inputPrice: 0.3, outputPrice: 0.18 },
+    { id: 'gpt-5-chat', name: 'GPT-5 Chat', context: 200000, maxOut: 65536, intel: 95, speed: 35, size: 'Frontier', inputPrice: 2.5, outputPrice: 20.0 },
+    { id: 'gpt-5-mini', name: 'GPT-5 Mini', context: 200000, maxOut: 65536, intel: 88, speed: 60, size: 'Large', inputPrice: 0.5, outputPrice: 4.0 },
+    { id: 'gpt-5-nano', name: 'GPT-5 Nano', context: 128000, maxOut: 32768, intel: 75, speed: 90, size: 'Small', inputPrice: 0.1, outputPrice: 0.8 },
+    { id: 'gpt-5.2-chat', name: 'GPT-5.2 Chat', context: 200000, maxOut: 65536, intel: 95, speed: 35, size: 'Frontier', inputPrice: 2.5, outputPrice: 20.0 },
+    { id: 'gpt-5.5', name: 'GPT-5.5', context: 200000, maxOut: 65536, intel: 98, speed: 25, size: 'Frontier', inputPrice: 10.0, outputPrice: 60.0 },
+    { id: 'gpt-oss-20b', name: 'GPT-OSS 20B', context: 131072, maxOut: 32768, intel: 80, speed: 50, size: 'Large', inputPrice: 75.0, outputPrice: 150.0 },
+    // DeepSeek family
+    { id: 'deepseek-v3', name: 'DeepSeek V3', context: 1048576, maxOut: 131072, intel: 92, speed: 40, size: 'Frontier', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'DeepSeek-V4-Flash', name: 'DeepSeek V4 Flash', context: 1048576, maxOut: 131072, intel: 85, speed: 70, size: 'Frontier', inputPrice: 0.14, outputPrice: 0.28 },
+    { id: 'deepseek/deepseek-reasoner', name: 'DeepSeek Reasoner', context: 1048576, maxOut: 131072, intel: 93, speed: 30, size: 'Frontier', inputPrice: 75.0, outputPrice: 75.0 },
+    // Gemini family
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', context: 1048576, maxOut: 65536, intel: 82, speed: 75, size: 'Large', inputPrice: 1.0, outputPrice: 3.0 },
+    { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite', context: 1048576, maxOut: 65536, intel: 72, speed: 85, size: 'Medium', inputPrice: 0.5, outputPrice: 0.75 },
+    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', context: 1048576, maxOut: 65536, intel: 94, speed: 35, size: 'Frontier', inputPrice: 4.0, outputPrice: 48.0 },
+    // GLM family
+    { id: 'glm-4.6', name: 'GLM 4.6', context: 131072, maxOut: 32768, intel: 72, speed: 80, size: 'Medium', inputPrice: 0.4, outputPrice: 0.08 },
+    { id: 'openai/zai-org/GLM-4.7', name: 'GLM 4.7', context: 131072, maxOut: 32768, intel: 75, speed: 78, size: 'Medium', inputPrice: 0.4, outputPrice: 0.08 },
+    // Kimi family
+    { id: 'kimi-k2.5', name: 'Kimi K2.5', context: 262144, maxOut: 65536, intel: 88, speed: 50, size: 'Frontier', inputPrice: 0.28, outputPrice: 0.154 },
+    { id: 'Kimi-K2.6', name: 'Kimi K2.6', context: 262144, maxOut: 65536, intel: 90, speed: 45, size: 'Frontier', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'Kimi-K2.6-azure', name: 'Kimi K2.6 (Azure)', context: 262144, maxOut: 65536, intel: 90, speed: 45, size: 'Frontier', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'kimi-thinking', name: 'Kimi Thinking', context: 262144, maxOut: 65536, intel: 92, speed: 30, size: 'Frontier', inputPrice: 75.0, outputPrice: 75.0 },
+    // Llama family
+    { id: 'llama-4-maverick', name: 'Llama 4 Maverick', context: 1048576, maxOut: 131072, intel: 82, speed: 55, size: 'Large', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'llama-70b-fast', name: 'Llama 70B Fast', context: 131072, maxOut: 32768, intel: 70, speed: 70, size: 'Large', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'llama-8b-fast', name: 'Llama 8B Fast', context: 131072, maxOut: 32768, intel: 45, speed: 95, size: 'Small', inputPrice: 75.0, outputPrice: 75.0 },
+    // MiniMax family
+    { id: 'minimax-m2', name: 'MiniMax M2', context: 1048576, maxOut: 65536, intel: 80, speed: 60, size: 'Large', inputPrice: 0.4, outputPrice: 0.44 },
+    { id: 'MiniMax-M2', name: 'MiniMax M2 (Caps)', context: 1048576, maxOut: 65536, intel: 80, speed: 60, size: 'Large', inputPrice: 0.4, outputPrice: 0.44 },
+    { id: 'minimax-m2.1', name: 'MiniMax M2.1', context: 1048576, maxOut: 65536, intel: 82, speed: 62, size: 'Large', inputPrice: 0.4, outputPrice: 0.44 },
+    { id: 'MiniMax-M2.1', name: 'MiniMax M2.1 (Caps)', context: 1048576, maxOut: 65536, intel: 82, speed: 62, size: 'Large', inputPrice: 0.4, outputPrice: 0.44 },
+    { id: 'MiniMax-M2.1-lightning', name: 'MiniMax M2.1 Lightning', context: 1048576, maxOut: 65536, intel: 80, speed: 90, size: 'Large', inputPrice: 0.2, outputPrice: 0.08 },
+    { id: 'MiniMax-M2.7', name: 'MiniMax M2.7', context: 1048576, maxOut: 65536, intel: 85, speed: 58, size: 'Frontier', inputPrice: 0.4, outputPrice: 0.44 },
+    // Embeddings
+    { id: 'text-embedding-3-large', name: 'Text Embedding 3 Large', context: 8191, maxOut: 0, intel: 0, speed: 100, size: 'Small', inputPrice: 75.0, outputPrice: 75.0 },
+    { id: 'text-embedding-3-small', name: 'Text Embedding 3 Small', context: 8191, maxOut: 0, intel: 0, speed: 100, size: 'Small', inputPrice: 75.0, outputPrice: 75.0 },
+  ];
+
+  // Stale model IDs from V27 that no longer match the Bluesminds API
+  const staleModelIds = [
+    'accounts/fireworks/models/deepseek-v4-pro',
+    'moonshotai/kimi-k2.6',
+    'qwen3.6-max-preview',
+    'z-ai/glm-5.1',
+  ];
+
+  const tx = db.transaction(() => {
+    // Disable stale models (non-destructive — user data is preserved)
+    const disableStale = db.prepare(
+      `UPDATE models SET enabled = 0 WHERE platform = 'bluesminds' AND model_id IN (${staleModelIds.map(() => '?').join(',')})`
+    );
+    disableStale.run(...staleModelIds);
+
+    // Upsert all correct models with pricing data
+    const upsert = db.prepare(`
+      INSERT INTO models
+        (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+         context_window, max_output_tokens, enabled, supports_vision, supports_tools,
+         input_price_per_million, output_price_per_million)
+      VALUES ('bluesminds', ?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?, ?)
+      ON CONFLICT(platform, model_id) DO UPDATE SET
+        display_name = excluded.display_name,
+        context_window = excluded.context_window,
+        max_output_tokens = excluded.max_output_tokens,
+        input_price_per_million = excluded.input_price_per_million,
+        output_price_per_million = excluded.output_price_per_million
+    `);
+    for (const m of models) {
+      upsert.run(m.id, m.name, m.intel, m.speed, m.size, m.context, m.maxOut, m.inputPrice, m.outputPrice);
+    }
+
+    // Ensure all Bluesminds models are in the fallback chain
+    const missing = db.prepare(`
+      SELECT m.id FROM models m
+      LEFT JOIN fallback_config f ON m.id = f.model_db_id
+      WHERE m.platform = 'bluesminds' AND m.enabled = 1 AND f.id IS NULL
+      ORDER BY m.intelligence_rank ASC
+    `).all() as { id: number }[];
+
+    if (missing.length > 0) {
+      const maxPriority = (db.prepare(
+        'SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config'
+      ).get() as { m: number }).m;
+      const insFb = db.prepare(
+        'INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)'
+      );
+      for (let i = 0; i < missing.length; i++) {
+        insFb.run(missing[i].id, maxPriority + i + 1);
+      }
+    }
+  });
+
+  try {
+    tx();
+  } catch (err) {
+    console.warn('[Migration] Bluesminds inventory seed skipped:', (err as Error).message);
   }
 }
